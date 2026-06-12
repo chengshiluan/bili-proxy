@@ -94,48 +94,73 @@ async function biWbiGet(baseUrl, params) {
 
 function parseDur(s) { const p = (s || '').split(':'); return p.length === 2 ? parseInt(p[0]) * 60 + parseInt(p[1]) : (p.length === 3 ? parseInt(p[0]) * 3600 + parseInt(p[1]) * 60 + parseInt(p[2]) : 0); }
 
+// AV to BV conversion helpers
+function avToBv(avid) {
+  const table = 'fZodR9XQDSUm21yCkr6zBqiveYah8bt4xsWpHnJE7jL5VG3guMTKpaN';
+  const tr = {}; for (let i = 0; i < table.length; i++) tr[table[i]] = i;
+  const s = [11,10,3,8,4,6];
+  const xor = 177451812;
+  const add = 8728348608;
+  const num = (parseInt(avid) ^ xor) + add;
+  let r = ['B','V','1',' ',' ','4',' ','1',' ','7',' ',' '];
+  for (let i = 0; i < 6; i++) r[s[i]] = table[Math.floor(num / Math.pow(58, i)) % 58];
+  return r.join('');
+}
+
 // ── API Handler ──
 async function handleAPI(url) {
   const a = url.searchParams.get('action');
   const kw = url.searchParams.get('keyword');
   const pg = parseInt(url.searchParams.get('page') || '1');
-  const bvid = url.searchParams.get('bvid');
-  const cid = url.searchParams.get('cid');
-  const sid = url.searchParams.get('sid');
+  const bvid = url.searchParams.get('bvid') || '';
+  const avid = url.searchParams.get('avid') || '';
+  const cid = url.searchParams.get('cid') || '';
+  const sid = url.searchParams.get('sid') || '';
   const ck = url.searchParams.get('cookie') || '';
 
   switch (a) {
     case 'search': {
+      // Mobile API search (returns AV IDs)
       const appResult = await biAppGet('/x/v2/search', { keyword: kw || '', pn: pg, ps: 20, search_type: 'video' });
       if (!appResult._proxy_error && appResult.code === 0) {
         const items = appResult.data?.item || [];
         const videos = items.filter(x => x.goto === 'av' && x.param);
         if (videos.length > 0) {
           return {
-            result: videos.map(x => ({
-              id: 'bitrack_v_' + x.param, title: (x.title || '').replace(/<[^>]+>/g, ''),
-              artist: x.author || '', source: 'bilibili',
-              source_url: 'https://www.bilibili.com/' + x.param,
-              img_url: (x.cover || '').startsWith('//') ? 'https:' + x.cover : (x.cover || ''),
-              duration: parseDur(x.duration),
-            })),
+            result: videos.map(x => {
+              const bvidFromApi = x.bvid || (x.param ? avToBv(x.param) : '');
+              return {
+                id: 'bitrack_v_' + (bvidFromApi || x.param),
+                title: (x.title || '').replace(/<[^>]+>/g, ''),
+                artist: x.author || '', source: 'bilibili',
+                source_url: 'https://www.bilibili.com/video/' + (bvidFromApi || 'av' + x.param),
+                img_url: (x.cover || '').startsWith('//') ? 'https:' + x.cover : (x.cover || ''),
+                duration: parseDur(x.duration),
+                avid: x.param || '',
+                bvid: bvidFromApi,
+              };
+            }),
             total: appResult.data?.page?.numResults || videos.length,
           };
         }
       }
+      // Wbi search fallback (returns BV IDs)
       const wbiResult = await biWbiGet('https://api.bilibili.com/x/web-interface/wbi/search/type', { keyword: kw, page: pg, page_size: 20, search_type: 'video' });
       if (!wbiResult._proxy_error && wbiResult.code === 0 && wbiResult.data?.result) {
         return {
           result: wbiResult.data.result.map(x => ({
             id: 'bitrack_v_' + x.bvid, title: (x.title || '').replace(/<em class="keyword">|<\/em>/g, ''),
             artist: x.author || '', source: 'bilibili',
-            source_url: 'https://www.bilibili.com/' + x.bvid,
+            source_url: 'https://www.bilibili.com/video/' + x.bvid,
             img_url: (x.pic || '').startsWith('//') ? 'https:' + x.pic : (x.pic || ''),
             duration: parseDur(x.duration),
+            avid: String(x.aid || ''),
+            bvid: x.bvid || '',
           })),
           total: wbiResult.data.numResults || 0,
         };
       }
+      // Web API fallback
       const headers = ck ? { 'Cookie': ck } : {};
       const d = await proxyGet('https://api.bilibili.com/x/web-interface/search/type?__refresh__=true&page=' + pg + '&page_size=20&platform=pc&highlight=1&keyword=' + encodeURIComponent(kw) + '&search_type=video', 'https://www.bilibili.com/', { ...headers, 'Origin': 'https://www.bilibili.com' });
       if (!d._proxy_error && d.data?.result) {
@@ -143,9 +168,11 @@ async function handleAPI(url) {
           result: d.data.result.map(x => ({
             id: 'bitrack_v_' + x.bvid, title: (x.title || '').replace(/<em class="keyword">|<\/em>/g, ''),
             artist: x.author || '', source: 'bilibili',
-            source_url: 'https://www.bilibili.com/' + x.bvid,
+            source_url: 'https://www.bilibili.com/video/' + x.bvid,
             img_url: (x.pic || '').startsWith('//') ? 'https:' + x.pic : (x.pic || ''),
             duration: parseDur(x.duration),
+            avid: String(x.aid || ''),
+            bvid: x.bvid || '',
           })),
           total: d.data?.numResults || 0,
         };
@@ -154,21 +181,32 @@ async function handleAPI(url) {
     }
 
     case 'view': {
-      const appInfo = await biAppGet('/x/v2/view', { bvid: bvid || '' });
+      // Get video info - support both avid and bvid
+      const viewParams = {};
+      if (bvid) viewParams.bvid = bvid;
+      else if (avid) viewParams.avid = avid;
+      else return { error: 'need bvid or avid' };
+
+      // Mobile API
+      const appInfo = await biAppGet('/x/v2/view', viewParams);
       if (!appInfo._proxy_error && appInfo.code === 0 && appInfo.data) {
         const pages = appInfo.data.pages || [];
         return {
           title: appInfo.data.title || '', pic: appInfo.data.pic || '',
           owner: appInfo.data.owner?.name || '',
+          bvid: appInfo.data.bvid || bvid, avid: String(appInfo.data.aid || avid),
           pages: pages.map(p => ({ cid: p.cid, page: p.page, part: p.part || '', duration: p.duration || 0 })),
         };
       }
-      const info = await proxyGet('https://api.bilibili.com/x/web-interface/view?bvid=' + bvid, 'https://www.bilibili.com/');
+      // Web API fallback
+      const qs = bvid ? 'bvid=' + bvid : 'aid=' + avid;
+      const info = await proxyGet('https://api.bilibili.com/x/web-interface/view?' + qs, 'https://www.bilibili.com/');
       if (!info._proxy_error && info.data) {
         const pages = info.data.pages || [];
         return {
           title: info.data.title || '', pic: info.data.pic || '',
           owner: info.data.owner?.name || '',
+          bvid: info.data.bvid || bvid, avid: String(info.data.aid || avid),
           pages: pages.map(p => ({ cid: p.cid, page: p.page, part: p.part || '', duration: p.duration || 0 })),
         };
       }
@@ -176,17 +214,21 @@ async function handleAPI(url) {
     }
 
     case 'playurl': {
-      const avid = url.searchParams.get('avid') || '';
-      const appPlay = await biAppGet('/x/v2/playurl', { avid: avid, bvid: bvid || '', cid: cid || '', qn: '64', fnval: '16', fourk: '1' });
+      const playParams = { bvid: bvid || '', cid: cid || '', qn: '64', fnval: '16', fourk: '1' };
+      if (avid) playParams.avid = avid;
+      // Mobile API
+      const appPlay = await biAppGet('/x/v2/playurl', playParams);
       if (!appPlay._proxy_error && appPlay.code === 0) {
         if (appPlay.data?.dash?.audio?.[0]?.baseUrl) return { url: appPlay.data.dash.audio[0].baseUrl, type: 'dash' };
         if (appPlay.data?.durl?.[0]?.url) return { url: appPlay.data.durl[0].url, type: 'durl' };
       }
+      // Web API fallback
       const ck2 = url.searchParams.get('cookie') || '';
       const hdr = ck2 ? { 'Cookie': ck2 } : {};
-      const d = await proxyGet('https://api.bilibili.com/x/player/playurl?fnval=16&bvid=' + bvid + '&cid=' + cid, 'https://www.bilibili.com/', hdr);
+      const qs2 = (bvid ? 'bvid=' + bvid : 'aid=' + avid) + '&cid=' + cid;
+      const d = await proxyGet('https://api.bilibili.com/x/player/playurl?fnval=16&' + qs2, 'https://www.bilibili.com/', hdr);
       if (!d._proxy_error && d.data?.dash?.audio?.[0]?.baseUrl) return { url: d.data.dash.audio[0].baseUrl, type: 'dash' };
-      const d2 = await proxyGet('https://api.bilibili.com/x/player/playurl?fnval=0&bvid=' + bvid + '&cid=' + cid, 'https://www.bilibili.com/', hdr);
+      const d2 = await proxyGet('https://api.bilibili.com/x/player/playurl?fnval=0&' + qs2, 'https://www.bilibili.com/', hdr);
       if (!d2._proxy_error && d2.data?.durl?.[0]?.url) return { url: d2.data.durl[0].url, type: 'durl' };
       return { error: 'failed to get playback url' };
     }
@@ -234,16 +276,15 @@ async function handleAPI(url) {
         const bvid2 = listId.replace('bipop_', '');
         const appInfo = await biAppGet('/x/v2/view', { bvid: bvid2 });
         if (!appInfo._proxy_error && appInfo.code === 0 && appInfo.data?.pages) {
-          const pages = appInfo.data.pages;
           return {
-            tracks: pages.map(p => ({
+            tracks: appInfo.data.pages.map(p => ({
               id: 'bitrack_v_' + bvid2 + '-' + p.cid, title: p.part || appInfo.data.title || '',
               artist: appInfo.data.owner?.name || '', source: 'bilibili',
-              source_url: 'https://www.bilibili.com/' + bvid2 + '?p=' + p.page,
+              source_url: 'https://www.bilibili.com/video/' + bvid2 + '?p=' + p.page,
               img_url: (appInfo.data.pic || '').startsWith('//') ? 'https:' + appInfo.data.pic : (appInfo.data.pic || ''),
               duration: parseInt(p.duration || 0),
             })),
-            total: pages.length,
+            total: appInfo.data.pages.length,
           };
         }
         const info = await proxyGet('https://api.bilibili.com/x/web-interface/view?bvid=' + bvid2, 'https://www.bilibili.com/');
@@ -252,7 +293,7 @@ async function handleAPI(url) {
             tracks: info.data.pages.map(p => ({
               id: 'bitrack_v_' + bvid2 + '-' + p.cid, title: p.part || info.data.title || '',
               artist: info.data.owner?.name || '', source: 'bilibili',
-              source_url: 'https://www.bilibili.com/' + bvid2 + '?p=' + p.page,
+              source_url: 'https://www.bilibili.com/video/' + bvid2 + '?p=' + p.page,
               img_url: (info.data.pic || '').startsWith('//') ? 'https:' + info.data.pic : (info.data.pic || ''),
               duration: parseInt(p.duration || 0),
             })),
@@ -272,15 +313,12 @@ async function handleAPI(url) {
 }
 
 export default async function handler(req, res) {
-  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
   res.setHeader('Access-Control-Max-Age', '86400');
 
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
+  if (req.method === 'OPTIONS') return res.status(200).end();
 
   const url = new URL(req.url, 'https://' + (req.headers.host || 'localhost'));
   const result = await handleAPI(url);
