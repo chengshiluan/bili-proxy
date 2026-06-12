@@ -307,6 +307,65 @@ async function handleAPI(url) {
     case 'ping':
       return { ok: true, time: Date.now(), from: 'vercel-proxy' };
 
+    // ── QQ Music vkey (CF Workers IPs blocked by QQ) ──
+    case 'qq_vkey': {
+      const songmid = url.searchParams.get('songmid') || '';
+      if (!songmid) return { error: 'need songmid' };
+      const fileTypes = [
+        { prefix: 'C400', ext: '.m4a' },
+        { prefix: 'M500', ext: '.mp3' },
+        { prefix: 'O400', ext: '.ogg' },
+      ];
+      for (const ft of fileTypes) {
+        const filename = ft.prefix + songmid + songmid + ft.ext;
+        const r = await fetch('https://u.y.qq.com/cgi-bin/musicu.fcg', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Referer': 'https://y.qq.com/', 'User-Agent': UA },
+          body: JSON.stringify({
+            req_1: { module: 'vkey.GetVkeyServer', method: 'CgiGetVkey',
+              param: { filename: [filename], guid: '10000', songmid: [songmid], songtype: [0], uin: '0', loginflag: 1, platform: '20' } },
+            loginUin: '0', comm: { uin: '0', format: 'json', ct: 24, cv: 0 }
+          })
+        });
+        const d = await r.json();
+        const purl = d.req_1?.data?.midurlinfo?.[0]?.purl;
+        if (purl) return { url: (d.req_1?.data?.sip?.[0] || '') + purl };
+      }
+      return { error: 'failed to get qq vkey' };
+    }
+
+    // ── Kugou playback (CF Workers IPs blocked) ──
+    case 'kg_play': {
+      const hash = url.searchParams.get('hash') || '';
+      const albumId = url.searchParams.get('album_id') || '0';
+      if (!hash) return { error: 'need hash' };
+      // Try m.kugou.com mobile API
+      const d1 = await fetch('https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=' + hash, {
+        headers: { 'Referer': 'https://m.kugou.com/', 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_3 like Mac OS X)' }
+      }).then(r => r.json()).catch(() => null);
+      if (d1 && d1.url) return { url: d1.url };
+      // Try wwwapi
+      const d2 = await fetch('https://wwwapi.kugou.com/yy/index.php?r=play/getdata&hash=' + hash + '&album_id=' + albumId + '&mid=1', {
+        headers: { 'Referer': 'https://www.kugou.com/', 'User-Agent': UA }
+      }).then(r => r.json()).catch(() => null);
+      if (d2?.data?.play_url) return { url: d2.data.play_url };
+      return { error: 'failed to get kugou play url' };
+    }
+
+    // ── Migu playback (region blocked from CF IPs) ──
+    case 'mg_play': {
+      const copyrightId = url.searchParams.get('copyright_id') || '';
+      const contentId = url.searchParams.get('content_id') || '';
+      const toneFlag = url.searchParams.get('tone_flag') || 'PQ';
+      if (!copyrightId) return { error: 'need copyright_id' };
+      const d = await fetch('https://app.c.nf.migu.cn/MIGUM3.0/strategy/pc/listen/v1.0?scene=&netType=01&resourceType=2&copyrightId=' + copyrightId + '&contentId=' + contentId + '&toneFlag=' + toneFlag, {
+        headers: { 'Referer': 'https://music.migu.cn/', 'User-Agent': UA, 'channel': '0146951' }
+      }).then(r => r.json()).catch(() => null);
+      if (d?.data?.playUrl?.url) return { url: d.data.playUrl.url };
+      if (d?.data?.url) return { url: d.data.url };
+      return { error: d?.info || 'failed to get migu play url' };
+    }
+
     default:
       return { error: 'unknown action: ' + a };
   }
